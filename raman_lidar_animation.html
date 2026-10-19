@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TCSPC Raman LiDAR – animated</title>
+<style>
+:root{--bg:#0d1829;--panel:#13233b;--line:#27405f;--ink:#e6edf7;--mute:#8fa5c2;--uv:#8c8cff;--n2:#ffb04a;--h2:#c79bff}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:980px;margin:0 auto;padding:22px 16px 40px}
+h1{font:600 26px/1.2 Georgia,"Iowan Old Style",serif;margin:0 0 6px}
+p.sub{margin:0 0 16px;color:var(--mute);max-width:70ch}
+canvas{width:100%;height:auto;display:block;background:var(--panel);border:1px solid var(--line);border-radius:8px}
+.chips{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:0 0 12px}
+.chip{border:1px solid var(--line);border-radius:6px;padding:7px 9px;font-size:12.5px;color:var(--mute);transition:all .25s}
+.chip b{display:block;color:var(--ink);font-weight:600;margin-bottom:2px}
+.chip.on{border-color:var(--n2);background:#2a2a2a55;color:var(--ink);box-shadow:0 0 12px #ffb04a44}
+.ctl{display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin:12px 0}
+button,select{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 12px;font:inherit}
+button:hover,select:hover{border-color:var(--mute)}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--n2);outline-offset:2px}
+label{color:var(--mute);font-size:13px;display:flex;gap:6px;align-items:center}
+#stat{display:flex;flex-wrap:wrap;gap:6px 22px;margin:10px 0;font-variant-numeric:tabular-nums;font-size:14px}
+#stat span{color:var(--mute)} #stat b{color:var(--ink);font-weight:600}
+footer{color:var(--mute);font-size:12.5px;max-width:80ch;margin-top:14px}
+</style></head><body><main>
+<h1>How a TCSPC Raman LiDAR finds hydrogen at 11 m</h1>
+<p class="sub">Schematic of the laboratory system in Lockwood, Wang &amp; Ironside (<i>Opt. Laser Technol.</i> 203, 115721): a 355 nm pulse crosses an H₂ plume, Raman photons return, and a time tagger builds range histograms.</p>
+<div class="chips" id="chips"></div>
+<canvas id="scene"></canvas>
+<div class="ctl">
+ <button id="play">Pause</button><button id="reset">Restart</button>
+ <label>H₂ at laser spot <select id="conc"><option value="3527">3527 ppm</option><option value="1800" selected>1800 ppm</option><option value="1000">1000 ppm</option></select></label>
+ <label>H₂ channel view <select id="mode"><option value="on">Cell on (H₂ + fluorescence)</option><option value="off">Cell off (fluorescence only)</option><option value="diff">On − off (H₂ Raman)</option></select></label>
+ <label>Integration speed <input type="range" id="spd" min="5" max="120" value="30"><span id="spdv">30×</span></label>
+</div>
+<div id="stat"></div>
+<canvas id="hist"></canvas>
+<footer>Illustrative, not to scale. Photon dots are exaggerated: in the real system most laser pulses yield no detection in a given 50 ps bin (≈10⁻⁴–10⁻³ photons/pulse/bin). Histogram shapes are generated from peak counts reported in the paper (Figs. 3, 4, 12, 13), with Poisson noise; they are not the raw data. LOD ≈ 137 ppm (3σ) for the 1800 ppm case, 600 s integration.</footer>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const steps=[["Laser fires","355 nm, 1.1 ns, 3 µJ, 10 kHz"],["Raman scattering","H₂ 416 nm, N₂ 387 nm at the plume"],["Collection","f/9 telescope, ~11 m return path"],["Filtering","2×LP355 blocks Rayleigh; beamsplitter + BP415/BP387"],["MPPC detects","single photon, 20 ns dead time"],["Time Tagger","50 ps bins; z = c·ToF/2"]];
+$('chips').innerHTML=steps.map((s,i)=>`<div class="chip" id="c${i}"><b>${s[0]}</b>${s[1]}</div>`).join('');
+const stageT=Array(6).fill(-1e9);
+const sc=$('scene'),hc=$('hist'),W=900,H=400,HW=900,HH=260;
+function fit(c,w,h){const d=devicePixelRatio||1;c.width=w*d;c.height=h*d;c.getContext('2d').setTransform(d,0,0,d,0,0)}
+fit(sc,W,H);fit(hc,HW,HH);
+const g=sc.getContext('2d'),h=hc.getContext('2d');
+const reduce=matchMedia('(prefers-reduced-motion: reduce)').matches;
+const A=[640,110],D=[290,302],E=[125,302];
+const routes={n2:[A,D,E,[125,238]],h2:[A,D,E,[50,302]],ray:[A,D,[160,302]]};
+for(const k in routes){const r=routes[k];r.cum=[0];for(let i=1;i<r.length;i++)r.cum.push(r.cum[i-1]+Math.hypot(r[i][0]-r[i-1][0],r[i][1]-r[i-1][1]));r.len=r.cum[r.length-1]}
+function pos(r,u){const d=u*r.len;let i=1;while(i<r.length-1&&r.cum[i]<d)i++;const t=(d-r.cum[i-1])/(r.cum[i]-r.cum[i-1]);return[r[i-1][0]+(r[i][0]-r[i-1][0])*t,r[i-1][1]+(r[i][1]-r[i-1][1])*t]}
+// state
+let playing=true,photons=[],pulses=[],flashes={m1:-1e9,m2:-1e9},emitT=0,simT=0;
+const NB=50,x0=10.2,dx=0.02;
+let accN2,accOn,accOff;
+const peakH={3527:340,1800:230,1000:150};
+const gauss=(x,m,s)=>Math.exp(-((x-m)**2)/(2*s*s));
+function poisson(m){if(m<=0)return 0;if(m>30)return Math.max(0,Math.round(m+Math.sqrt(m)*(Math.random()+Math.random()+Math.random()+Math.random()-2)*1.73));let L=Math.exp(-m),k=0,p=1;do{k++;p*=Math.random()}while(p>L);return k-1}
+function resetAcc(){accN2=Array(NB).fill(0);accOn=Array(NB).fill(0);accOff=Array(NB).fill(0);simT=0}
+resetAcc();
+const plume=Array.from({length:80},()=>({p:Math.random(),o:(Math.random()+Math.random()+Math.random()-1.5)*14}));
+function now(){return performance.now()}
+function stage(i){stageT[i]=now()}
+function emit(){pulses.push({x:100});stage(0)}
+function scatter(){
+ const conc=+$('conc').value,off=$('mode').value==='off';
+ stage(1);
+ photons.push({r:routes.ray,u:0,c:'#8c8cff',k:'ray'});
+ if(Math.random()<.85)photons.push({r:routes.n2,u:0,c:'#ffb04a',k:'n2'});
+ const p=(off?0:.7*conc/3527)+.2;
+ if(Math.random()<p)photons.push({r:routes.h2,u:0,c:'#c79bff',k:'h2'});
+}
+function upd(dt){
+ emitT-=dt;if(emitT<=0){emit();emitT=1.15}
+ for(const p of pulses){const o=p.x;p.x+=380*dt;if(o<640&&p.x>=640)scatter()}
+ pulses=pulses.filter(p=>p.x<870);
+ for(const p of photons){
+  p.u+=dt*430/p.r.len;const q=pos(p.r,p.u);
+  if(p.u>.3&&!p.s2){p.s2=1;stage(2)}
+  if(q[0]<200&&!p.s3){p.s3=1;stage(3)}
+  if(p.u>=1&&!p.done){p.done=1;if(p.k==='h2'){flashes.m1=now();stage(4);stage(5)}else if(p.k==='n2'){flashes.m2=now();stage(4);stage(5)}}
+ }
+ photons=photons.filter(p=>p.u<1.02);
+ for(const q of plume){q.p+=dt*.45;if(q.p>1){q.p=0;q.o=(Math.random()+Math.random()+Math.random()-1.5)*14}}
+}
+function integrate(dt){
+ if(simT>=600)return;
+ const s=Math.min(600-simT,dt*(+$('spd').value));simT+=s;const f=s/600,conc=+$('conc').value;
+ for(let i=0;i<NB;i++){const x=x0+(i+.5)*dx;
+  accN2[i]+=poisson(29000*gauss(x,10.72,.17)*f);
+  const fl=45*gauss(x,10.74,.09),bg=8,h2=peakH[conc]*gauss(x,10.74,.1);
+  accOn[i]+=poisson((bg+fl+h2)*f);accOff[i]+=poisson((bg+fl)*f);}
+}
+// drawing
+function line(pts,col,w,dash){g.beginPath();g.moveTo(...pts[0]);for(let i=1;i<pts.length;i++)g.lineTo(...pts[i]);g.strokeStyle=col;g.lineWidth=w;g.setLineDash(dash||[]);g.stroke();g.setLineDash([])}
+function txt(s,x,y,col,al,sz){g.fillStyle=col||'#8fa5c2';g.font=(sz||12)+'px system-ui,sans-serif';g.textAlign=al||'left';g.fillText(s,x,y)}
+function box(x,y,w,hh,fill,stroke){g.fillStyle=fill;g.strokeStyle=stroke;g.lineWidth=1.5;g.beginPath();g.roundRect(x,y,w,hh,4);g.fill();g.stroke()}
+function glow(x,y,r,c){const gr=g.createRadialGradient(x,y,0,x,y,r*3);gr.addColorStop(0,c);gr.addColorStop(1,'transparent');g.fillStyle=gr;g.beginPath();g.arc(x,y,r*3,0,7);g.fill()}
+function drawScene(){
+ const t=now(),conc=+$('conc').value,mode=$('mode').value;
+ g.clearRect(0,0,W,H);
+ // optical bench grid
+ g.fillStyle='#183049';for(let x=20;x<W;x+=30)for(let y=20;y<H;y+=30){g.fillRect(x,y,1.5,1.5)}
+ // beam
+ line([[100,110],[860,110]],'#8c8cff55',3);
+ box(860,98,24,24,'#2a2f45','#8c8cff');txt('Beam stop',872,92,'#8fa5c2','center');
+ // backscatter path
+ line([A,D],'#ffb04a40',2,[6,6]);line([D,E],'#ffb04a30',2,[6,6]);
+ txt('≈ 11 m return path',470,225,'#ffb04a','center');
+ // plume
+ const show=mode!=='off',a=show?.25+.6*conc/3527:0;
+ if(show)for(const q of plume){const y=190-q.p*125,x=640+q.o*(.25+q.p*1.1);g.fillStyle=`rgba(199,155,255,${(1-q.p)*a})`;g.beginPath();g.arc(x,y,3.2,0,7);g.fill()}
+ box(630,190,20,16,'#7d8ea6','#c1d0e4');txt('H₂ nozzle (5 mm)',640,226,'#8fa5c2','center');
+ txt(show?'plume · '+conc+' ppm at beam':'electrolysis cell off',640,242,show?'#c79bff':'#8fa5c2','center');
+ // laser
+ box(30,90,70,40,'#1f3a63','#8c8cff');txt('Laser',65,115,'#e6edf7','center');txt('355 nm · 10 kHz',65,82,'#8c8cff','center',11);
+ // time tagger + wires
+ box(190,150,150,60,'#1d3a55','#4f7fb0');txt('Time Tagger',265,176,'#e6edf7','center',13);txt('reverse start-stop · 50 ps',265,194,'#8fa5c2','center',11);
+ line([[65,130],[65,160],[190,160]],'#8c8cff80',1.5,[3,3]);txt('trigger',100,155,'#8c8cff','left',11);
+ line([[45,290],[45,200],[190,200]],'#c79bff80',1.5,[3,3]);line([[145,228],[170,228],[170,185],[190,185]],'#ffb04a80',1.5,[3,3]);
+ // receiver
+ box(170,285,120,34,'#0f1b2d','#9fb6d3');txt('6-inch f/9 telescope',230,338,'#8fa5c2','center');
+ g.fillStyle='#4aa86a';g.fillRect(150,290,3,24);g.fillRect(157,290,3,24);txt('2×LP355',154,282,'#4aa86a','center',11);
+ line([[108,316],[142,288]],'#9fb6d3',3);txt('beamsplitter',125,334,'#8fa5c2','center',11);
+ g.fillStyle='#c79bff';g.fillRect(72,290,3,24);txt('BP415',73,282,'#c79bff','center',11);
+ g.fillStyle='#ffb04a';g.fillRect(108,262,24,3);txt('BP387',150,268,'#ffb04a','left',11);
+ const f1=Math.max(0,1-(t-flashes.m1)/500),f2=Math.max(0,1-(t-flashes.m2)/500);
+ box(20,290,32,24,'#2b1f45','#c79bff');txt('MPPC1',36,328,'#c79bff','center',11);txt('H₂',36,306,'#c79bff','center');
+ box(105,215,40,24,'#3a2a14','#ffb04a');txt('MPPC2 (N₂)',125,208,'#ffb04a','center',11);
+ if(f1>0)glow(36,302,6,`rgba(199,155,255,${f1})`);if(f2>0)glow(125,227,6,`rgba(255,176,74,${f2})`);
+ // pulses & photons
+ for(const p of pulses){glow(p.x,110,5,'#8c8cff');g.fillStyle='#fff';g.fillRect(p.x-6,108,12,4)}
+ for(const p of photons){const q=pos(p.r,p.u);let al=1;if(p.k==='ray'&&q[0]<200)al=Math.max(0,(q[0]-160)/40);if(al>0){glow(q[0],q[1],3,p.c);g.globalAlpha=al;g.fillStyle=p.c;g.beginPath();g.arc(q[0],q[1],3.2,0,7);g.fill();g.globalAlpha=1}}
+ if(photons.some(p=>p.k==='ray'&&pos(p.r,p.u)[0]<170))txt('Rayleigh 355 nm blocked',160,380,'#8c8cff','center',11);
+ // legend
+ txt('UV pump 355 nm',20,375,'#8c8cff');txt('N₂ Raman 387 nm',20,391,'#ffb04a');txt('H₂ Raman 416 nm',140,391,'#c79bff');
+ // chips
+ for(let i=0;i<6;i++)$('c'+i).classList.toggle('on',t-stageT[i]<650);
+}
+function plot(ox,oy,w,hh,arr,ymin,ymax,col,title,extra){
+ h.strokeStyle='#27405f';h.lineWidth=1;h.fillStyle='#8fa5c2';h.font='11px system-ui';h.textAlign='center';
+ h.strokeRect(ox,oy,w,hh);
+ for(let v=10.2;v<=11.21;v+=.2){const x=ox+(v-x0)/(NB*dx)*w;h.beginPath();h.moveTo(x,oy+hh);h.lineTo(x,oy+hh+4);h.stroke();h.fillText(v.toFixed(1),x,oy+hh+16)}
+ h.fillText('distance (m)',ox+w/2,oy+hh+30);
+ h.textAlign='right';const ty=v=>oy+hh-(v-ymin)/(ymax-ymin)*hh;
+ const tick=(ymax-ymin)/4;for(let i=0;i<=4;i++){const v=ymin+i*tick;h.fillText(Math.round(v),ox-5,ty(v)+4);if(i&&i<4){h.strokeStyle='#1b3250';h.beginPath();h.moveTo(ox,ty(v));h.lineTo(ox+w,ty(v));h.stroke()}}
+ h.fillStyle='#e6edf7';h.textAlign='left';h.font='600 13px system-ui';h.fillText(title,ox,oy-10);
+ h.beginPath();for(let i=0;i<NB;i++){const xa=ox+i/NB*w,xb=ox+(i+1)/NB*w,y=Math.max(oy,Math.min(oy+hh,ty(arr[i])));if(i==0)h.moveTo(xa,y);else h.lineTo(xa,y);h.lineTo(xb,y)}
+ h.strokeStyle=col;h.lineWidth=2;h.stroke();
+ if(extra)extra(ox,oy,w,hh,ty);
+}
+function drawHist(){
+ h.clearRect(0,0,HW,HH);const mode=$('mode').value;
+ plot(48,30,380,170,accN2,0,32000,'#ffb04a','N₂ Raman, 387 nm (system reference)');
+ let arr=accOn,tt='H₂ channel 416 nm: cell on';
+ if(mode==='off'){arr=accOff;tt='H₂ channel 416 nm: cell off (fluorescence)'}
+ if(mode==='diff'){arr=accOn.map((v,i)=>v-accOff[i]);tt='H₂ Raman: cell on − cell off'}
+ plot(508,30,380,170,arr,-50,400,'#c79bff',tt,(ox,oy,w,hh,ty)=>{
+  if(mode==='diff'){h.setLineDash([5,4]);h.strokeStyle='#4aa86a';h.lineWidth=1.5;h.beginPath();h.moveTo(ox,ty(17.25));h.lineTo(ox+w,ty(17.25));h.stroke();h.setLineDash([]);h.fillStyle='#4aa86a';h.font='11px system-ui';h.textAlign='right';h.fillText('3σ noise ≈ 17 counts/bin',ox+w-4,ty(17.25)-5)}});
+ h.save();h.translate(12,115);h.rotate(-Math.PI/2);h.fillStyle='#8fa5c2';h.font='11px system-ui';h.textAlign='center';h.fillText('counts per bin',0,0);h.restore();
+ h.save();h.translate(472,115);h.rotate(-Math.PI/2);h.fillStyle='#8fa5c2';h.font='11px system-ui';h.textAlign='center';h.fillText('counts per bin',0,0);h.restore();
+}
+function stats(){
+ const pk=a=>Math.max(...a);const diff=accOn.map((v,i)=>v-accOff[i]);
+ $('stat').innerHTML=`<div><span>integration </span><b>${simT.toFixed(0)} s / 600 s</b></div><div><span>laser pulses </span><b>${(simT*1e4).toExponential(1).replace('e+','×10^')}</b></div><div><span>N₂ peak </span><b>${pk(accN2)} counts</b></div><div><span>H₂ net peak </span><b>${Math.max(0,pk(diff))} counts</b></div>${simT>=600?'<div><b style="color:#4aa86a">600 s complete: H₂ peak clearly above 3σ noise</b></div>':''}`;
+}
+let last=now();
+function loop(){const t=now(),dt=Math.min(.05,(t-last)/1000);last=t;
+ if(playing){upd(dt);integrate(dt)}
+ drawScene();drawHist();stats();requestAnimationFrame(loop)}
+$('play').onclick=()=>{playing=!playing;$('play').textContent=playing?'Pause':'Play'};
+$('reset').onclick=()=>{resetAcc();photons=[];pulses=[];emitT=0};
+$('conc').onchange=()=>{resetAcc()};
+$('spd').oninput=()=>{$('spdv').textContent=$('spd').value+'×'};
+if(reduce){playing=false;$('play').textContent='Play'}
+loop();
+</script></body></html>
