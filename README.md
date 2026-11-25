@@ -5,5 +5,5 @@ This Google Colaboratory notebook implements a numerical model for Time-Correlat
 
 In summary, there are two contributions to the spatial resolution: the sample region length, $\delta z = c\delta t/2$, and the pulse-width-limited range resolution, $\Delta z = cP_w$. For the case discussed in the publication (see below), $\delta t=50 ps$ and $P_w=1.1 ns$, and so the spatial resolution is dominated by the laser pulse width.
 
-**See the publication:** -
+**See the publication:**
 A. Lockwood, J. Wang, and C. N. Ironside, "Time-correlated single-photon counting (TCSPC) Raman LiDAR for stand-off detection of hydrogen," Optics & Laser Technology, vol. 203, p. 115721, 2026/11/01/ 2026, doi: https://doi.org/10.1016/j.optlastec.2026.115721.
